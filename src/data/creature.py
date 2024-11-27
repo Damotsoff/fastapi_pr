@@ -1,24 +1,49 @@
-from .init import (curs, IntegrityError)
-from model.creature import Creature
-from error import Missing, Duplicate
+from data import curs, conn
+from models.creature import Creature
+from errors import Missing, Duplicate
 
-curs.execute("""create table if not exists creature(
-                name text primary key,
-                country text,
-                area text,
-                description text,
-                aka text)""")
+# Создание таблицы (если не существует) | Creating a table (if it does not exist)
+curs.execute(
+    """
+    CREATE TABLE IF NOT EXISTS creature(
+        name TEXT PRIMARY KEY,
+        country TEXT,
+        area TEXT,
+        description TEXT,
+        aka TEXT
+    )
+"""
+)
+conn.commit()
+
 
 def row_to_model(row: tuple) -> Creature:
+    """Конвертирует строку из базы данных в модель Creature."""
     name, country, area, description, aka = row
-    return Creature(name=name,
-        country=country,
-        area=area,
-        description=description,
-        aka=aka)
+    return Creature(
+        name=name, country=country, area=area, description=description, aka=aka
+    )
+
 
 def model_to_dict(creature: Creature) -> dict:
+    """Конвертирует модель Creature в словарь для SQL-запросов."""
     return creature.dict()
+
+
+def create(creature: Creature):
+    """Добавляет запись в таблицу creature."""
+    try:
+        qry = """INSERT  INTO creature
+                (name, country, area, description, aka)
+                VALUES
+                (:name, :country, :area, :description, :aka)"""
+        params = model_to_dict(creature)
+        curs.execute(qry, params)
+        conn.commit()
+        return creature
+    except Exception as e:
+        raise Duplicate(msg=e)
+
 
 def get_one(name: str) -> Creature:
     qry = "select * from creature where name=:name"
@@ -30,30 +55,22 @@ def get_one(name: str) -> Creature:
     else:
         raise Missing(msg=f"Creature {name} not found")
 
+
 def get_all() -> list[Creature]:
-    qry = "select * from creature"
+    """Возвращает все записи из таблицы creature."""
+    qry = "SELECT * FROM creature"
     curs.execute(qry)
     return [row_to_model(row) for row in curs.fetchall()]
-    
+
+
 def get_random_name() -> str:
-    qry = "select name from creature order by random() limit 1"
+    """Возвращает случайное имя из таблицы creature."""
+    qry = "SELECT name FROM creature ORDER BY random() LIMIT 1"
     curs.execute(qry)
     row = curs.fetchone()
-    name = row[0]
-    return name
+    if row:
+        return row[0]
 
-def create(creature: Creature) -> Creature:
-    qry = """insert into creature
-        (name, country, area, description, aka)
-        values
-        (:name, :country, :area, :description, :aka)"""
-    params = model_to_dict(creature)
-    try:
-        curs.execute(qry, params)
-        return get_one(creature.name)
-    except IntegrityError:
-        raise Duplicate(msg=
-            f"Creature {creature.name} already exists")
 
 def modify(name: str, creature: Creature) -> Creature:
     qry = """update creature set
@@ -66,14 +83,17 @@ def modify(name: str, creature: Creature) -> Creature:
     params = model_to_dict(creature)
     params["orig_name"] = name
     curs.execute(qry, params)
+    conn.commit()
     if curs.rowcount == 1:
         return get_one(creature.name)
     else:
         raise Missing(msg=f"Creature {name} not found")
 
+
 def delete(name: str):
     qry = "delete from creature where name = :name"
     params = {"name": name}
     curs.execute(qry, params)
+    conn.commit()
     if curs.rowcount != 1:
         raise Missing(msg=f"Creature {name} not found")

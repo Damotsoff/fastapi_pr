@@ -1,85 +1,111 @@
-import os
 from datetime import timedelta
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.security import (
-    OAuth2PasswordBearer, OAuth2PasswordRequestForm)
-from model.user import User
+import os
+from fastapi import APIRouter, HTTPException, Depends, status, Response
+from fastapi.security import OAuth2PasswordRequestForm
+from models.user import User
+from errors import Missing, Duplicate
+
 if os.getenv("CRYPTID_UNIT_TEST"):
     from fake import user as service
 else:
     from service import user as service
-from error import Missing, Duplicate
 
-ACCESS_TOKEN_EXPIRE_MINUTES = 15
 
-router = APIRouter(prefix = "/user")
+router = APIRouter(prefix="/user", tags=["auth_user"])
 
-# --- new auth stuff
-
-# This dependency makes a post to "/user/token"
-# (from a form containing a username and password)
-# return an access token.
-oauth2_dep = OAuth2PasswordBearer(tokenUrl="token")
 
 def unauthed():
     raise HTTPException(
-        status_code=401,
+        status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Incorrect username or password",
         headers={"WWW-Authenticate": "Bearer"},
-        )
-
-# This endpoint is directed to by any call that has the
-# oauth2_dep() dependency:
-@router.post("/token")
-async def create_access_token(
-    form_data: OAuth2PasswordRequestForm =  Depends()
-):
-    """Get username and password from OAuth form,
-        return access token"""
-    user = service.auth_user(form_data.username, form_data.password)
-    if not user:
-        unauthed()
-    expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = service.create_access_token(
-        data={"sub": user.username}, expires=expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
 
-@router.get("/token")
-def get_access_token(token: str = Depends(oauth2_dep)) -> dict:
-    """Return the current access token"""
-    return {"token": token}
 
-# --- previous CRUD stuff
-
-@router.get("/")
+@router.get("/", status_code=status.HTTP_200_OK)
 def get_all() -> list[User]:
     return service.get_all()
 
-@router.get("/{name}")
-def get_one(name) -> User:
-    try:
-        return service.get_one(name)
-    except Missing as exc:
-        raise HTTPException(status_code=404, detail=exc.msg)
 
-@router.post("/", status_code=201)
-def create(user: User) -> User:
+@router.get("/{name}")
+def get_one(
+    name: str, current_user: User = Depends(service.get_current_user)
+) -> User | dict[str, str] | None:
+    if not current_user:
+        unauthed()
+    try:
+        if current_user.name == "admin":
+            return service.get_one(name)
+        return {"message": "You are not admin to access this resource"}
+    except Missing as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.msg)
+
+
+@router.post("/", status_code=status.HTTP_201_CREATED)
+def create(user: User) -> User | None:
     try:
         return service.create(user)
     except Duplicate as exc:
-        raise HTTPException(status_code=409, detail=exc.msg)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.msg)
+
 
 @router.patch("/{name}")
-def modify(name: str, user: User) -> User:
+def modify(
+    name: str, user: User, current_user: User = Depends(service.get_current_user)
+) -> User | dict[str, str] | None:
+    if not current_user:
+        unauthed()
     try:
-        return service.modify(name, user)
+        if current_user.name == "admin":
+            return service.modify(name, user)
+        return {"message": "You are not admin to access this resource"}
     except Missing as exc:
-        raise HTTPException(status_code=404, detail=exc.msg)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.msg)
 
-@router.delete("/{name}")
-def delete(name: str) -> None:
+
+@router.delete("/{name}", status_code=status.HTTP_200_OK)
+def delete(name: str, current_user=Depends(service.get_current_user)) -> bool | None:
+    if not current_user:
+        unauthed()
     try:
         return service.delete(name)
     except Missing as exc:
-        raise HTTPException(status_code=404, detail=exc.msg)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.msg)
+
+
+@router.post("/login", status_code=status.HTTP_200_OK)
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(), response: Response = None
+) -> dict:
+    # Аутентификация пользователя(User Authentication)
+    user = service.auth_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Генерация токена(Token generation)
+    access_token_expires = timedelta(minutes=5)
+    access_token = service.create_access_token(
+        data={"sub": user.name}, expires=access_token_expires
+    )
+
+    # Сохранение токена в куки(Saving the token to a cookie)
+    response.set_cookie(key="access_token", value=access_token, httponly=True)
+
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.post("/logout", status_code=status.HTTP_200_OK)
+def logout(response: Response):
+    response.delete_cookie(key="access_token")
+    return {"msg": "Logged out successfully"}
+
+
+@router.get("/get/me", status_code=status.HTTP_200_OK)
+def read_current_user(current_user: User = Depends(service.get_current_user)):
+    if not current_user:
+        unauthed()
+    return {"username": current_user.name, "password": current_user.hash}
